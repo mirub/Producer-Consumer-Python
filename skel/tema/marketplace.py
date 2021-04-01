@@ -6,8 +6,7 @@ Assignment 1
 March 2021
 """
 
-from threading import BoundedSemaphore
-import queue
+from threading import BoundedSemaphore, currentThread
 
 class Marketplace:
     """
@@ -22,27 +21,37 @@ class Marketplace:
         :param queue_size_per_producer: the maximum size of a queue associated with each producer
         """
         self.max_queue_size = queue_size_per_producer
+        # Correlate (product, producer_id)
         self.products = {}
-        self.producer_q_sizes = []
+        # Correlate (producer_id, [products])
+        self.producer_queues = {}
+        # All the available products in the marketplace
         self.available_prod = []
+        # Correlate (cart_id, [cart_products])
         self.carts = {}
+        # Number of producers
         self.num_prod = 0
+        # Number of carts
         self.num_cart = 0
 
+        # Mutexes implemented with BoundedSmaphore
         self.producer_log_mutex = BoundedSemaphore(1)
+        self.producer_publish_mutex = BoundedSemaphore(1)
         self.producer_cart_mutex = BoundedSemaphore(1)
         self.consumer_add_mutex = BoundedSemaphore(1)
+        self.consumer_order_mutex = BoundedSemaphore(1)
 
     def register_producer(self):
         """
         Returns an id for the producer that calls this.
         """
-        self.producer_log_mutex.acquire()
-        self.num_prod += 1
-        new_id = self.num_prod
-        self.producer_q_sizes.append(0)
-        self.producer_log_mutex.release()
+        with self.producer_log_mutex:
+            # Using mutex to safely increment a value
+            self.num_prod += 1
+            new_id = self.num_prod
 
+        # Initialize a queue for the new producer
+        self.producer_queues[new_id] = []
         return new_id
 
     def publish(self, producer_id, product):
@@ -57,12 +66,15 @@ class Marketplace:
 
         :returns True or False. If the caller receives False, it should wait and then try again.
         """
-        if self.producer_q_sizes[int(producer_id)] >= self.max_queue_size:
-            return False
-        
-        self.producer_q_sizes[int(producer_id)] += 1
-        self.products[product] = producer_id
-        self.available_prod.append(product)
+        # If there are too many products in the queue
+        with self.producer_publish_mutex:
+            if len(self.producer_queues[int(producer_id)]) >= self.max_queue_size:
+                return False
+
+            # Add the product to the prod queues and available_prod
+            self.producer_queues[int(producer_id)].append(product)
+            self.products[product] = int(producer_id)
+            self.available_prod.append(product)
 
         return True
 
@@ -72,12 +84,16 @@ class Marketplace:
 
         :returns an int representing the cart_id
         """
-        self.producer_cart_mutex.acquire()
-        self.num_cart += 1
-        self.carts[self.num_cart] = queue.Queue()
-        self.producer_cart_mutex.release()
 
-        return self.num_cart
+        with self.producer_cart_mutex:
+            # Using mutex to safely increment cart number
+            self.num_cart += 1
+            new_cart = self.num_cart
+
+        # Initialize a queue for the new cart
+        self.carts[self.num_cart] = []
+
+        return new_cart
 
     def add_to_cart(self, cart_id, product):
         """
@@ -91,13 +107,21 @@ class Marketplace:
 
         :returns True or False. If the caller receives False, it should wait and then try again
         """
-        self.consumer_add_mutex.acquire()
-        if product in self.available_prod:
-            self.producer_q_sizes[self.products[product]] -= 1
-            self.available_prod.remove(product)
-            self.carts[cart_id].put(product)
+        with self.consumer_add_mutex:
+            if product in self.available_prod:
+                # Remove the product from producer queue and available products
+                self.available_prod.remove(product)
+
+                for (producer, p_list) in self.producer_queues.items():
+                    # Remove the product from the producer's queue
+                    if product in p_list:
+                        self.producer_queues[producer].remove(product)
+                        self.products[product] = producer
+                        break
+
+            # Add the product to the cart
+            self.carts[cart_id].append(product)
             return True
-        self.consumer_add_mutex.release()
 
         return False
 
@@ -112,11 +136,10 @@ class Marketplace:
         :param product: the product to remove from cart
         """
 
-        # We do not need a lock because Queue is thread-safe
-        self.carts[cart_id].get(product)
-        self.available_prod.append(product)
-        self.producer_q_sizes[self.products[product]] += 1
-
+        # Remove the product from cart
+        if product in self.carts[cart_id]:
+            self.carts[cart_id].remove(product)
+            self.available_prod.append(product)
 
     def place_order(self, cart_id):
         """
@@ -125,4 +148,12 @@ class Marketplace:
         :type cart_id: Int
         :param cart_id: id cart
         """
-        pass
+        # Get the cart products
+        order_list = self.carts[cart_id]
+        # Remove the cart list from the cart map
+        self.carts.pop(cart_id)
+        for product in order_list:
+            # Mutex to print the messages correctly
+            with self.consumer_order_mutex:
+                print(f"{currentThread().getName()} bought {product}")
+        return order_list

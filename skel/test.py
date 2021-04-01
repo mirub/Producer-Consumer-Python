@@ -4,6 +4,7 @@ This module runs the homework's solution on a given testfile
 Computer Systems Architecture Course
 Assignment 1
 March 2020
+
 """
 
 import sys
